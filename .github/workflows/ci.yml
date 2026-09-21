@@ -1,0 +1,70 @@
+name: CI
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test:
+    name: ${{ matrix.module == '.' && 'core' || 'spanner' }} / Go ${{ matrix.go }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - module: .
+            go: '1.24.x'
+          - module: .
+            go: stable
+          - module: spanner
+            go: '1.25.x'
+          - module: spanner
+            go: stable
+    defaults:
+      run:
+        working-directory: ${{ matrix.module }}
+    env:
+      GOWORK: 'off'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ matrix.go }}
+          cache-dependency-path: '${{ matrix.module }}/go.sum'
+      - name: Start Spanner emulator
+        if: matrix.module == 'spanner'
+        run: |
+          docker run -d --rm --name es-emulator -p 9010:9010 -p 9020:9020 gcr.io/cloud-spanner-emulator/emulator@sha256:c6f3402f2599684f295a0fdefb6fbbbfb18a0e43e309ff5456ccb452a4570a79
+          echo 'SPANNER_EMULATOR_HOST=localhost:9010' >> "$GITHUB_ENV"
+          for attempt in $(seq 1 60); do
+            if curl -s http://localhost:9020/v1/projects > /dev/null; then exit 0; fi
+            sleep 1
+          done
+          docker logs es-emulator
+          exit 1
+      - name: Verify module metadata
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
+      - name: Check formatting
+        run: test -z "$(gofmt -l *.go)"
+      - name: Vet
+        run: go vet ./...
+      - name: Race tests and coverage
+        run: go test -race -covermode=atomic -coverprofile=coverage.out ./...
+      - name: Require exact 100% statement coverage
+        run: |
+          if [ '${{ matrix.module }}' = '.' ]; then
+            ./scripts/check-coverage.sh coverage.out
+          else
+            ../scripts/check-coverage.sh coverage.out
+          fi
+      - name: Vulnerability scan
+        if: matrix.go == 'stable'
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
+      - name: Upload raw coverage
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-${{ matrix.module == '.' && 'core' || 'spanner' }}-${{ matrix.go }}
+          path: '${{ matrix.module }}/coverage.out'

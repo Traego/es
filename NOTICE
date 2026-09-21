@@ -1,0 +1,6 @@
+Traego ES
+Copyright 2025-2026 Pat White
+
+Originally developed as the event-sourcing package in Traego's traego-svcs
+repository. Extracted from commit 194b6388392342e8d50655ccd3198405f6e9a494,
+with concurrency, persistence, consumer lifecycle, and API improvements.
