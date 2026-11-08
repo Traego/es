@@ -13,7 +13,7 @@ support lives in a separate module.
 
 ```sh
 go get github.com/traego/es@v0.1.0
-# Optional persistent backend:
+# Released persistent backend:
 go get github.com/traego/es/spanner@v0.1.0
 ```
 
@@ -26,7 +26,7 @@ pre-1.0 release; public APIs may evolve.
 - Aggregates with pending events, contiguous historical replay, and version checks.
 - Atomic aggregate batch saves with optimistic concurrency, including new streams.
 - A concurrency-safe in-memory event store that serializes events and isolates reads.
-- An optional Spanner adapter with an embedded fresh-database schema.
+- Optional SQLite and Spanner adapters in separate modules. [SQLite](sqlite/README.md) adds durable local storage and atomic application/event/checkpoint transactions; it is not released yet.
 - Event type registration, pluggable codecs, and a JSON codec.
 - Partition consumers with cancellation, bounded retries, persistent cursors, panic recovery, and restart support.
 - Current-state materializers for building application read models.

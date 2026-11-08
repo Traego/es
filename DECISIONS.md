@@ -26,3 +26,22 @@ to a topic partition. It is captured per worker during initialization; this does
 not promise one simultaneous boundary across partitions. Pages remain
 at-least-once and are checkpointed only after successful handling. The
 application must still coordinate one owner per subscriber/partition.
+
+## SQLite shared transaction boundary (2026-11-07)
+
+Implement SQLite in a separate `es/sqlite` module with a pinned pure-Go driver,
+WAL, FULL synchronization and per-connection immediate transactions. Use namespaced
+schema metadata and tables so application tables can share the database file.
+Unique event keys are `(topic,stream,version)`; committed sequence positions order
+pages independently of clock time. Checkpoints have a table, not a sidecar file.
+
+`Store.Transact` joins low-level event writes, application SQL and checkpoint
+updates on one transaction. Its transaction is rollback-only after a write/query
+error even if the callback ignores that error. It exposes no commit operation and
+is deliberately not an EventStore: AggregateStore clears pending events and a
+live engine updates its read model after SaveEvents, which would be premature
+inside an uncommitted outer transaction. Ordinary EventStore calls commit before
+returning; higher-level engine participation requires staged memory and explicit
+post-commit publication in the application. External device actions and other
+files cannot be rolled back by SQLite. StreamProcessor remains at-least-once;
+an atomic projection/checkpoint loop must deliberately use the shared transaction.
