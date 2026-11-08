@@ -22,6 +22,25 @@ type StreamProcessor interface {
 	Stop()
 }
 
+// StartPosition chooses the initial position of a subscriber without a saved
+// checkpoint. An existing checkpoint, including an empty one, takes precedence.
+type StartPosition int
+
+const (
+	// StartBeginning reads existing history before following new events. It is
+	// the default for backward compatibility.
+	StartBeginning StartPosition = iota
+	// StartTail skips existing history and follows events after initialization.
+	StartTail
+)
+
+// WithStartPosition sets the policy used only when no checkpoint exists, or on
+// every run when cursor persistence is disabled. Initialization occurs separately
+// for each partition as its worker starts, not when the processor is constructed.
+func WithStartPosition(position StartPosition) StreamProcessorOption {
+	return func(sp *streamProcessor) { sp.startPosition = position }
+}
+
 type processorRun struct {
 	cancel context.CancelFunc
 	done   chan struct{}
@@ -38,6 +57,7 @@ type streamProcessor struct {
 	processEventRetryConfig RetryConfig
 	eventStore              EventStore
 	persistCursor           bool
+	startPosition           StartPosition
 	parent                  context.Context
 	mu                      sync.Mutex
 	run                     *processorRun
@@ -102,6 +122,9 @@ func (sp *streamProcessor) validate() error {
 	}
 	if sp.pollingTime <= 0 || len(sp.partitions) == 0 {
 		return fmt.Errorf("stream processor requires a positive polling interval and at least one partition")
+	}
+	if sp.startPosition != StartBeginning && sp.startPosition != StartTail {
+		return fmt.Errorf("invalid subscriber start position: %d", sp.startPosition)
 	}
 	seen := make(map[int]bool, len(sp.partitions))
 	for _, partition := range sp.partitions {
@@ -171,21 +194,55 @@ func (sp *streamProcessor) Stop() {
 	}
 }
 
-func (sp *streamProcessor) processPartition(ctx context.Context, partition int) error {
+// initialCursor loads a saved checkpoint or initializes and persists a new
+// baseline before any handlers run. Persisting even an empty baseline prevents
+// a tail subscriber from silently skipping events after an idle restart.
+func (sp *streamProcessor) initialCursor(ctx context.Context, partition int) (string, error) {
 	cursor := ""
+	missing := true
 	if sp.persistCursor {
 		err := RetryWithExponentialBackoff(ctx, sp.systemRetryConfig, func() error {
 			var err error
 			cursor, err = sp.eventStore.GetSubscriptionCursor(ctx, sp.topic, sp.subscriberId, partition)
-			if errors.Is(err, ErrCursorNotFound) {
+			missing = errors.Is(err, ErrCursorNotFound)
+			if missing {
 				cursor = ""
 				return nil
 			}
 			return err
 		})
 		if err != nil {
-			return fmt.Errorf("load cursor for partition %d: %w", partition, err)
+			return "", fmt.Errorf("load cursor for partition %d: %w", partition, err)
 		}
+	}
+	if !missing {
+		return cursor, nil
+	}
+	if sp.startPosition == StartTail {
+		err := RetryWithExponentialBackoff(ctx, sp.systemRetryConfig, func() error {
+			var err error
+			cursor, err = sp.eventStore.GetTailCursor(ctx, sp.topic, partition)
+			return err
+		})
+		if err != nil {
+			return "", fmt.Errorf("capture tail for partition %d: %w", partition, err)
+		}
+	}
+	if sp.persistCursor {
+		err := RetryWithExponentialBackoff(ctx, sp.systemRetryConfig, func() error {
+			return sp.eventStore.SaveSubscriptionCursor(ctx, sp.topic, sp.subscriberId, partition, cursor)
+		})
+		if err != nil {
+			return "", fmt.Errorf("initialize cursor for partition %d: %w", partition, err)
+		}
+	}
+	return cursor, nil
+}
+
+func (sp *streamProcessor) processPartition(ctx context.Context, partition int) error {
+	cursor, err := sp.initialCursor(ctx, partition)
+	if err != nil {
+		return err
 	}
 	ticker := time.NewTicker(sp.pollingTime)
 	defer ticker.Stop()

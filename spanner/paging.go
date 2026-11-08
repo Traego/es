@@ -39,18 +39,18 @@ func decodeCursor(value, topic string, partition int) (cursorData, error) {
 	var wire cursorWire
 	data, err := base64.RawURLEncoding.DecodeString(value)
 	if err != nil {
-		return cursor, fmt.Errorf("invalid cursor encoding: %w", err)
+		return cursor, fmt.Errorf("invalid cursor encoding: %w: %w", es.ErrCursorNotFound, err)
 	}
 	if err := json.Unmarshal(data, &wire); err != nil {
-		return cursor, fmt.Errorf("invalid cursor data: %w", err)
+		return cursor, fmt.Errorf("invalid cursor data: %w: %w", es.ErrCursorNotFound, err)
 	}
 	stamp, err := time.Parse(time.RFC3339Nano, wire.Timestamp)
 	if err != nil {
-		return cursor, fmt.Errorf("invalid cursor timestamp: %w", err)
+		return cursor, fmt.Errorf("invalid cursor timestamp: %w: %w", es.ErrCursorNotFound, err)
 	}
 	cursor = cursorData{wire.Topic, wire.Partition, stamp, wire.Stream, wire.Version}
 	if cursor.Topic != topic || cursor.Partition != partition || cursor.Timestamp.IsZero() || !nonempty(cursor.Stream) || cursor.Version <= 0 {
-		return cursor, fmt.Errorf("invalid cursor or wrong topic/partition")
+		return cursor, fmt.Errorf("invalid cursor or wrong topic/partition: %w", es.ErrCursorNotFound)
 	}
 	return cursor, nil
 }
@@ -105,19 +105,8 @@ func (s *Store) GetEventsByOrgs(ctx context.Context, topic string, partition int
 		stmt.Params["version"] = int64(data.Version)
 	}
 	stmt.SQL += " ORDER BY global_timestamp ASC, stream_name ASC, version ASC LIMIT @limit"
-	rows, err := s.db.read(ctx, spanner.Statement{SQL: "SELECT partition_count FROM Topics WHERE topic_name = @topic", Params: map[string]any{"topic": topic}})
-	if err != nil {
-		return result, fmt.Errorf("read topic: %w", err)
-	}
-	if len(rows) == 0 {
-		return result, fmt.Errorf("unknown topic %q", topic)
-	}
-	var count int64
-	if err := rows[0].Column(0, &count); err != nil {
-		return result, fmt.Errorf("decode partition count: %w", err)
-	}
-	if count <= 0 || uint64(count) > 1<<32-1 || int64(partition) >= count {
-		return result, fmt.Errorf("invalid topic partition count or partition out of range")
+	if err := s.validatePartition(ctx, topic, partition); err != nil {
+		return result, err
 	}
 	events, err := s.readEvents(ctx, stmt)
 	if err != nil {
@@ -166,4 +155,47 @@ func (s *Store) SaveSubscriptionCursor(ctx context.Context, topic, subscriber st
 		}
 	}
 	return s.db.apply(ctx, []*spanner.Mutation{spanner.InsertOrUpdate("Cursors", []string{"topic", "subscriber_id", "partition_id", "cursor", "updated_at"}, []any{topic, subscriber, int64(partition), cursor, spanner.CommitTimestamp})})
+}
+
+func (s *Store) validatePartition(ctx context.Context, topic string, partition int) error {
+	rows, err := s.db.read(ctx, spanner.Statement{SQL: "SELECT partition_count FROM Topics WHERE topic_name = @topic", Params: map[string]any{"topic": topic}})
+	if err != nil {
+		return fmt.Errorf("read topic: %w", err)
+	}
+	if len(rows) == 0 {
+		return fmt.Errorf("unknown topic %q", topic)
+	}
+	var count int64
+	if err := rows[0].Column(0, &count); err != nil {
+		return fmt.Errorf("decode partition count: %w", err)
+	}
+	if count <= 0 || uint64(count) > 1<<32-1 || int64(partition) >= count {
+		return fmt.Errorf("invalid topic partition count or partition out of range")
+	}
+	return nil
+}
+
+// GetTailCursor captures the last committed event's position for one partition
+// without decoding payloads or replaying history. An empty partition returns "".
+func (s *Store) GetTailCursor(ctx context.Context, topic string, partition int) (string, error) {
+	if !nonempty(topic) || partition < 0 {
+		return "", fmt.Errorf("topic and nonnegative partition are required")
+	}
+	if err := s.validatePartition(ctx, topic, partition); err != nil {
+		return "", err
+	}
+	rows, err := s.db.read(ctx, spanner.Statement{SQL: "SELECT global_timestamp, stream_name, version FROM Events WHERE topic = @topic AND partition_id = @partition ORDER BY global_timestamp DESC, stream_name DESC, version DESC LIMIT 1", Params: map[string]any{"topic": topic, "partition": int64(partition)}})
+	if err != nil {
+		return "", fmt.Errorf("read tail: %w", err)
+	}
+	if len(rows) == 0 {
+		return "", nil
+	}
+	var stamp time.Time
+	var stream string
+	var version int64
+	if err := rows[0].Columns(&stamp, &stream, &version); err != nil {
+		return "", fmt.Errorf("decode tail: %w", err)
+	}
+	return encodeCursor(cursorData{Topic: topic, Partition: partition, Timestamp: stamp, Stream: stream, Version: int(version)}), nil
 }

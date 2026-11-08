@@ -109,6 +109,43 @@ views, not historical side effects. Snapshot storage is an extension interface;
 automatic snapshotting, event upcasting, and incremental projection replay are
 not implemented in this release. Retain compatible codecs for old events.
 
+### Starting a new subscriber
+
+Durable adapters keep subscription checkpoints in a table keyed by
+`(topic, subscriber_id, partition_id)`. `GetSubscriptionCursor` returns
+`ErrCursorNotFound` for a missing row. A saved empty cursor is a deliberate
+beginning-of-history checkpoint, not a missing subscription.
+
+Choose the policy for a subscriber with no saved checkpoint:
+
+```go
+processor := es.NewStreamProcessorWithContext(
+    ctx, store, "device-actions", "world", []int{0}, true, handle,
+    es.WithStartPosition(es.StartTail),
+)
+```
+
+`StartBeginning` is the default and replays existing history; `StartTail` captures
+that partition's current end and follows only later appends. Each worker captures
+its boundary during initialization. An existing checkpoint always wins, even if
+the configured policy changes. The initial checkpoint is saved before reading or
+handling any page, including when the topic is empty, so an idle restart cannot
+skip intervening events. A failed initialization is reported through `Start`'s
+error channel and no handlers run. Pages are still checkpointed only after every
+handler succeeds. Exactly one owner per subscriber/partition must be coordinated
+externally; initialization and cursor saves do not introduce distributed leases.
+
+With persistence disabled, the selected start policy is applied on every run.
+For projections use `WithMaterializerStartPosition`; materializers also default
+to `StartBeginning`. Saved checkpoints are explicitly reset by saving `""`, which
+requests replay from the beginning regardless of a tail default.
+
+Custom `EventStore` implementations must implement the new `GetTailCursor`
+operation. It returns an opaque position after all events currently committed to
+one topic partition, without scanning/decoding the event history. Later appends
+must remain readable from that position, including for an initially empty topic.
+Malformed or wrong-scope cursors match `ErrCursorNotFound` across adapters.
+
 Cursors are opaque and backend-specific. They are not authorization tokens;
 applications must authorize topic/organization filters independently. Durable
 cursor writes are separate from application side effects.

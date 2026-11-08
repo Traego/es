@@ -226,6 +226,9 @@ func TestStreamProcessorCheckpointAfterWholePage(t *testing.T) {
 					return EventsPage{}, ctx.Err()
 				},
 				save: func(_ context.Context, _ int, c string) error {
+					if !existing && c == "" && handled.Load() == 0 {
+						return nil
+					}
 					if handled.Load() != 2 || c != "after" {
 						return errors.New("checkpoint before completed page")
 					}
@@ -257,7 +260,12 @@ func TestStreamProcessorContextCancelsHandler(t *testing.T) {
 	var saved atomic.Bool
 	store := processorTestStore{fetch: func(context.Context, int, string) (EventsPage, error) {
 		return EventsPage{Events: []Envelope{{}, {}}, NextCursor: "after"}, nil
-	}, save: func(context.Context, int, string) error { saved.Store(true); return nil }}
+	}, save: func(_ context.Context, _ int, cursor string) error {
+		if cursor != "" {
+			saved.Store(true)
+		}
+		return nil
+	}}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	sp := NewStreamProcessorWithContext(ctx, store, "sub", "topic", []int{0}, true, func(ctx context.Context, _ Envelope) error { close(entered); <-ctx.Done(); return ctx.Err() }, processorTestOptions()...)

@@ -113,3 +113,14 @@ go tool cover -func=coverage.out
 The emulator suite skips when `SPANNER_EMULATOR_HOST` is unset. Full statement
 coverage requires both unit and emulator tests; no production files are excluded.
 The root repository's CI enforces the exact covered-statement count.
+
+## Subscriber initialization
+
+Checkpoints live in the `Cursors` table, keyed by topic, subscriber ID and
+partition. Missing rows return `es.ErrCursorNotFound`; a saved empty value is an
+explicit replay checkpoint. The processor chooses the initial policy using
+`es.WithStartPosition(es.StartBeginning)` (default) or `es.StartTail`. A saved row
+always takes precedence. Tail capture reads the last committed position with an
+indexed metadata query; it does not replay or decode existing payloads. Initial
+checkpoints are persisted before event processing, including for empty topics.
+Malformed and wrong-scope cursor errors match `es.ErrCursorNotFound`.
