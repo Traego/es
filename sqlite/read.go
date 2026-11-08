@@ -2,6 +2,7 @@ package sqlitestore
 
 import (
 	"context"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -18,8 +19,19 @@ type record struct {
 	envelope es.Envelope
 }
 
+// queryer is implemented by both a database pool and its active transaction.
+// Shared read paths must use the supplied executor to preserve one snapshot.
+type queryer interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
 func (s *Store) read(ctx context.Context, query string, args ...any) ([]record, error) {
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	return s.readFrom(ctx, s.db, query, args...)
+}
+
+func (s *Store) readFrom(ctx context.Context, source queryer, query string, args ...any) ([]record, error) {
+	rows, err := source.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -111,9 +123,9 @@ func (s *Store) decode(value, topic string, partition int) (int64, error) {
 	return c.Position, nil
 }
 
-func (s *Store) scope(ctx context.Context, topic string, partition int) error {
+func (s *Store) scopeFrom(ctx context.Context, source queryer, topic string, partition int) error {
 	var count int
-	if err := s.db.QueryRowContext(ctx, "SELECT partitions FROM es_topics WHERE topic=?", topic).Scan(&count); err != nil {
+	if err := source.QueryRowContext(ctx, "SELECT partitions FROM es_topics WHERE topic=?", topic).Scan(&count); err != nil {
 		return err
 	}
 	if partition < -1 || partition >= count {
@@ -125,14 +137,18 @@ func (s *Store) scope(ctx context.Context, topic string, partition int) error {
 // GetTailCursor captures the committed end of a topic partition without decoding
 // history. Sequence ordering is independent of recording timestamps.
 func (s *Store) GetTailCursor(ctx context.Context, topic string, partition int) (string, error) {
+	return s.tailFrom(ctx, s.db, topic, partition)
+}
+
+func (s *Store) tailFrom(ctx context.Context, source queryer, topic string, partition int) (string, error) {
 	if !valid(topic) || partition < 0 {
 		return "", fmt.Errorf("topic and nonnegative partition required")
 	}
-	if err := s.scope(ctx, topic, partition); err != nil {
+	if err := s.scopeFrom(ctx, source, topic, partition); err != nil {
 		return "", err
 	}
 	var position int64
-	if err := s.db.QueryRowContext(ctx, "SELECT COALESCE(MAX(position),0) FROM es_events WHERE topic=? AND partition=?", topic, partition).Scan(&position); err != nil {
+	if err := source.QueryRowContext(ctx, "SELECT COALESCE(MAX(position),0) FROM es_events WHERE topic=? AND partition=?", topic, partition).Scan(&position); err != nil {
 		return "", err
 	}
 	return s.encode(topic, partition, position), nil
@@ -149,6 +165,10 @@ func (s *Store) GetEventsByTopic(ctx context.Context, topic string, partition in
 // GetEventsByOrgs pages a topic in committed sequence order. Empty orgs selects
 // all organisations; partition -1 selects all partitions. This is not auth.
 func (s *Store) GetEventsByOrgs(ctx context.Context, topic string, partition int, orgs []string, value string) (es.EventsPage, error) {
+	return s.pageFrom(ctx, s.db, topic, partition, orgs, value)
+}
+
+func (s *Store) pageFrom(ctx context.Context, source queryer, topic string, partition int, orgs []string, value string) (es.EventsPage, error) {
 	page := es.EventsPage{NextCursor: value}
 	if !valid(topic) || partition < -1 {
 		return page, fmt.Errorf("invalid topic or partition")
@@ -161,7 +181,7 @@ func (s *Store) GetEventsByOrgs(ctx context.Context, topic string, partition int
 			return page, err
 		}
 	}
-	if err := s.scope(ctx, topic, partition); err != nil {
+	if err := s.scopeFrom(ctx, source, topic, partition); err != nil {
 		return page, err
 	}
 	q := "SELECT " + columns + " FROM es_events WHERE topic=? AND position>?"
@@ -178,7 +198,7 @@ func (s *Store) GetEventsByOrgs(ctx context.Context, topic string, partition int
 	}
 	q += " ORDER BY position LIMIT ?"
 	args = append(args, s.pageSize)
-	records, err := s.read(ctx, q, args...)
+	records, err := s.readFrom(ctx, source, q, args...)
 	if err != nil {
 		return page, err
 	}

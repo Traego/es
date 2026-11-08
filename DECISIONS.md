@@ -45,3 +45,25 @@ returning; higher-level engine participation requires staged memory and explicit
 post-commit publication in the application. External device actions and other
 files cannot be rolled back by SQLite. StreamProcessor remains at-least-once;
 an atomic projection/checkpoint loop must deliberately use the shared transaction.
+
+## Atomic materialized views and checkpoints (2026-11-07)
+
+The next local slice is an event-by-event `sqlite.Store.MaterializeBatch` helper.
+A batch loads its checkpoint, reads the event page, updates application view
+rows and advances its checkpoint on one SQLite transaction. Success reports
+committed progress only. Errors and process crashes cannot leave a view change
+without its corresponding checkpoint. Stored checkpoints take precedence over
+beginning/tail initialization; empty-topic initialization is durable too.
+
+This is a bounded single-partition operation driven by the application, not a
+second background worker framework. It deliberately consumes actual envelopes
+instead of calling the generic materializer's latest-aggregate loader. The
+existing Materializer and StreamProcessor keep their semantics. View handlers
+stay inside the supplied transaction; external effects remain outside the
+atomicity guarantee. SQLite-specific view SQL stays in application persistence
+adapters, and the ordinary EventStore interface remains unchanged.
+
+A reference counter view proves page-boundary state, atomic failure/retry,
+independent subscribers/partitions, competing workers, restart, a quiescent
+rebuild and process exit before/after commit. Full Nexus read-model persistence
+and online view-version swaps are subsequent slices.

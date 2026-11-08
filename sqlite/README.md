@@ -110,10 +110,76 @@ engine participation needs an explicit application unit of work with post-commit
 publication. That is separate from this adapter and does not require SQL in the
 engine's ordinary storage interface.
 
-An atomic projection/checkpoint update also requires an application-owned consume
-loop using `Transact`. The existing StreamProcessor invokes handlers and saves
-its checkpoint afterward; it is still at-least-once and is not silently made an
-exactly-once transactional consumer by selecting this adapter.
+For atomic event-by-event projections use `MaterializeBatch` below. The existing
+StreamProcessor invokes handlers and saves its checkpoint afterward; it remains
+at-least-once and is not silently changed by selecting this adapter.
+
+## Transactional materialized views
+
+`MaterializeBatch` processes one bounded event page and commits its view updates
+and checkpoint in one transaction. It reads the checkpoint and the event page
+through that same transaction, including with a one-connection pool. It supplies
+the recorded envelope directly; it does not load a newer aggregate snapshot.
+
+Create and migrate your view tables with application SQL. For example, the
+reference view in `materialize_test.go` has `(org, stream, total, version)`, keyed
+by organisation and stream. It counts processed events and guards against
+applying the same stream version twice:
+
+```go
+cfg := sqlitestore.MaterializerConfig{
+    SubscriberID: "stream-counts-v1",
+    Topic:        "world",
+    Partition:    0,
+    StartPosition: es.StartBeginning,
+}
+result, err := store.MaterializeBatch(ctx, cfg,
+    func(ctx context.Context, tx *sqlitestore.Transaction, event es.Envelope) error {
+        _, err := tx.ExecContext(ctx, `INSERT INTO stream_counts
+            (org, stream, total, version) VALUES (?, ?, 1, ?)
+            ON CONFLICT(org, stream) DO UPDATE SET
+              total = stream_counts.total + 1, version = excluded.version
+            WHERE stream_counts.version < excluded.version`,
+            event.GetOrgId(), event.GetStreamName(), event.GetVersion())
+        return err
+    })
+```
+
+On success, `result.Processed` counts delivered envelopes and `result.Cursor` is
+committed progress. Zero processed events means the view was caught up at this
+transaction's snapshot. On error, the result is zero and no provisional progress
+is acknowledged. Handler errors, ignored SQL failures, checkpoint failures,
+commit failures and panics roll back the whole page; panics propagate. A crash
+before commit leaves the previous view and checkpoint; a crash after commit
+retains both. The tests exercise both cases in separate processes.
+
+The caller schedules batches and chooses polling, shutdown and error handling.
+Drain successful nonempty batches, then wait when idle; do not busy-loop empty
+transactions. Callbacks run once per attempted batch and may run again after a
+rollback. Keep them short and limit effects to this transaction's SQL. They must
+not use Store methods or manage this subscription's checkpoint themselves.
+There are no new background goroutines or automatic retries.
+
+Use a unique subscriber ID per view/version. Each call handles one partition;
+independent partitions have independent checkpoints. The helper consumes every
+envelope on that partition, so filter event types/organisations inside your
+handler and include the organisation in view keys where appropriate. This
+filtering is not authorization. Existing checkpoints override start policy;
+absent checkpoints are initialized even for empty topics. `StartBeginning` is
+the default for rebuilding views; `StartTail` intentionally skips older events.
+Malformed saved checkpoints fail rather than being silently reset.
+
+A quiescent rebuild can delete the view rows and save an empty checkpoint in
+one `Transact`, then replay through `MaterializeBatch`. The reference tests prove
+that restart and rebuild produce the same view. Pause consumers during the reset
+and keep source writes quiescent when comparing a fixed result. Production
+online rebuilds can use a new subscriber/version and separate view tables before
+switching readers; that orchestration is application work.
+
+The generic `es.Materializer` retains its latest-aggregate semantics. This SQLite
+helper is an optional adapter capability; it does not put SQL into the ordinary
+`es.EventStore` interface. View SQL belongs in an application's persistence
+adapter so its domain and device connectors remain database-independent.
 
 ## Backup and portability
 

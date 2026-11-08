@@ -19,11 +19,15 @@ func subscription(topic, subscriber string, partition int) error {
 // GetSubscriptionCursor distinguishes absent rows from explicitly saved empty
 // checkpoints, using the same ErrCursorNotFound sentinel as other adapters.
 func (s *Store) GetSubscriptionCursor(ctx context.Context, topic, subscriber string, partition int) (string, error) {
+	return s.checkpointFrom(ctx, s.db, topic, subscriber, partition)
+}
+
+func (s *Store) checkpointFrom(ctx context.Context, source queryer, topic, subscriber string, partition int) (string, error) {
 	if err := subscription(topic, subscriber, partition); err != nil {
 		return "", err
 	}
 	var value string
-	err := s.db.QueryRowContext(ctx, "SELECT cursor FROM es_cursors WHERE topic=? AND subscriber=? AND partition=?", topic, subscriber, partition).Scan(&value)
+	err := source.QueryRowContext(ctx, "SELECT cursor FROM es_cursors WHERE topic=? AND subscriber=? AND partition=?", topic, subscriber, partition).Scan(&value)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", es.ErrCursorNotFound
 	}
