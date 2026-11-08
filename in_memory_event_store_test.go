@@ -531,16 +531,16 @@ func TestMemorySubscriptionIdentityAndValidation(t *testing.T) {
 	ctx := context.Background()
 	s := NewInMemoryEventStore()
 	cursor, err := s.GetSubscriptionCursor(ctx, "a", "b:c", 0)
-	require.NoError(t, err)
+	require.ErrorIs(t, err, ErrCursorNotFound)
 	require.Empty(t, cursor)
-	require.NoError(t, s.SaveSubscriptionCursor(ctx, "a", "b:c", 0, "first"))
-	require.NoError(t, s.SaveSubscriptionCursor(ctx, "a:b", "c", 0, "second"))
-	require.NoError(t, s.SaveSubscriptionCursor(ctx, "a", "b:c", 1, "third"))
+	require.NoError(t, s.SaveSubscriptionCursor(ctx, "a", "b:c", 0, memoryCursorFor("a", 0, 0)))
+	require.NoError(t, s.SaveSubscriptionCursor(ctx, "a:b", "c", 0, memoryCursorFor("a:b", 0, 0)))
+	require.NoError(t, s.SaveSubscriptionCursor(ctx, "a", "b:c", 1, memoryCursorFor("a", 1, 0)))
 	for _, tc := range []struct {
 		topic, subscriber string
 		partition         int
 		expected          string
-	}{{"a", "b:c", 0, "first"}, {"a:b", "c", 0, "second"}, {"a", "b:c", 1, "third"}} {
+	}{{"a", "b:c", 0, memoryCursorFor("a", 0, 0)}, {"a:b", "c", 0, memoryCursorFor("a:b", 0, 0)}, {"a", "b:c", 1, memoryCursorFor("a", 1, 0)}} {
 		cursor, err := s.GetSubscriptionCursor(ctx, tc.topic, tc.subscriber, tc.partition)
 		require.NoError(t, err)
 		require.Equal(t, tc.expected, cursor)

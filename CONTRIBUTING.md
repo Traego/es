@@ -16,8 +16,11 @@ The separate `spanner/` module needs the Cloud Spanner emulator for integration
 tests and full coverage. Follow its README, then run the same vet/test commands
 there and `../scripts/check-coverage.sh coverage.out`.
 
-Both modules require exact 100% statement coverage. Include observable behavior
-assertions, failure paths, and regression cases. Do not exclude source files,
+All modules, including `sqlite/`, require exact 100% statement coverage. Run the
+same vet, race-test and coverage commands in `sqlite/` with
+`../scripts/check-coverage.sh`; SQLite tests use local temporary files and need no
+emulator. Include observable behavior assertions, failure paths, and regression
+cases. Do not exclude source files,
 rewrite coverage profiles, or add build tags to improve the percentage.
 
 Preserve at-least-once delivery, atomic batch writes, tenant metadata, stable

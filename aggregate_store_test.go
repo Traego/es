@@ -376,6 +376,10 @@ type MockFailingEventStore struct {
 	savedEvents map[string][]Envelope // Add internal storage for events
 }
 
+func (m *MockFailingEventStore) GetTailCursor(context.Context, string, int) (string, error) {
+	panic("unexpected tail operation in aggregate-store test")
+}
+
 func (m *MockFailingEventStore) GetSubscriptionCursor(ctx context.Context, topic, subscriberId string, partitionId int) (string, error) {
 	panic("unexpected cursor operation in aggregate-store test")
 }

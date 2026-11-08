@@ -19,6 +19,7 @@ type materializer struct {
 	aggregateType   AggregateRoot
 	streamProcessor StreamProcessor
 	pollingTime     time.Duration
+	startPosition   StartPosition
 }
 
 type MaterializerOption func(*materializer, *EventStore)
@@ -27,6 +28,12 @@ func WithMaterializerEventStore(eventStore EventStore) MaterializerOption {
 	return func(m *materializer, es *EventStore) {
 		*es = eventStore
 	}
+}
+
+// WithMaterializerStartPosition selects the initial position when a materializer
+// has no checkpoint. The default is StartBeginning so projections rebuild history.
+func WithMaterializerStartPosition(position StartPosition) MaterializerOption {
+	return func(m *materializer, _ *EventStore) { m.startPosition = position }
 }
 
 func WithMaterializerPollingTime(duration time.Duration) MaterializerOption {
@@ -91,6 +98,7 @@ func NewMaterializerWithContext(
 		persistCursor,
 		m.processEvent,
 		WithNewMessagePollingTime(usePollingTime),
+		WithStartPosition(m.startPosition),
 	)
 
 	return m

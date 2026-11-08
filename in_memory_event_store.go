@@ -239,13 +239,9 @@ func (s *InMemoryEventStore) GetEventsByOrgs(ctx context.Context, topic string, 
 	}
 	position := 0
 	if cursor != "" {
-		data, err := base64.RawURLEncoding.DecodeString(cursor)
+		decoded, err := decodeMemoryCursor(cursor, topic, partitionId)
 		if err != nil {
-			return EventsPage{}, fmt.Errorf("invalid cursor: %w", ErrCursorNotFound)
-		}
-		var decoded memoryCursor
-		if json.Unmarshal(data, &decoded) != nil || decoded.Format != 1 || decoded.Topic != topic || decoded.Partition != partitionId || decoded.Position < 0 {
-			return EventsPage{}, fmt.Errorf("invalid cursor scope or format: %w", ErrCursorNotFound)
+			return EventsPage{}, err
 		}
 		position = decoded.Position
 	}
@@ -325,7 +321,11 @@ func (s *InMemoryEventStore) GetSubscriptionCursor(ctx context.Context, topic, s
 	if topic == "" || subscriberId == "" || partitionId < 0 {
 		return "", fmt.Errorf("invalid subscription identity")
 	}
-	return s.subscriptionCursors[memorySubscription{topic, subscriberId, partitionId}], nil
+	cursor, exists := s.subscriptionCursors[memorySubscription{topic, subscriberId, partitionId}]
+	if !exists {
+		return "", ErrCursorNotFound
+	}
+	return cursor, nil
 }
 
 func (s *InMemoryEventStore) SaveSubscriptionCursor(ctx context.Context, topic, subscriberId string, partitionId int, cursor string) error {
@@ -337,8 +337,42 @@ func (s *InMemoryEventStore) SaveSubscriptionCursor(ctx context.Context, topic, 
 	if topic == "" || subscriberId == "" || partitionId < 0 {
 		return fmt.Errorf("invalid subscription identity")
 	}
+	if cursor != "" {
+		if _, err := decodeMemoryCursor(cursor, topic, partitionId); err != nil {
+			return err
+		}
+	}
 	s.subscriptionCursors[memorySubscription{topic, subscriberId, partitionId}] = cursor
 	return nil
 }
 
 var _ EventStore = (*InMemoryEventStore)(nil)
+
+// GetTailCursor captures an append boundary for one topic partition under the
+// store lock. Its position includes all currently committed writes, even when
+// the selected partition has no events yet.
+func (s *InMemoryEventStore) GetTailCursor(ctx context.Context, topic string, partitionId int) (string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	count, exists := s.topicPartitions[topic]
+	if !exists || partitionId < 0 || partitionId >= count {
+		return "", fmt.Errorf("unknown topic or invalid partition")
+	}
+	data, _ := json.Marshal(memoryCursor{Topic: topic, Partition: partitionId, Position: len(s.events), Format: 1})
+	return base64.RawURLEncoding.EncodeToString(data), nil
+}
+
+func decodeMemoryCursor(cursor, topic string, partitionId int) (memoryCursor, error) {
+	data, err := base64.RawURLEncoding.DecodeString(cursor)
+	if err != nil {
+		return memoryCursor{}, fmt.Errorf("invalid cursor: %w", ErrCursorNotFound)
+	}
+	var decoded memoryCursor
+	if json.Unmarshal(data, &decoded) != nil || decoded.Format != 1 || decoded.Topic != topic || decoded.Partition != partitionId || decoded.Position < 0 {
+		return memoryCursor{}, fmt.Errorf("invalid cursor scope or format: %w", ErrCursorNotFound)
+	}
+	return decoded, nil
+}
